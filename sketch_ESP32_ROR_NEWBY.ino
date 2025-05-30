@@ -51,12 +51,12 @@
 /*-----------------------------------------------------------------------------------------------------------------------------------------------*/
 
 // WiFi credentials
-const char*           ssid = "NNET";
-const char*           password = "NEWBYNET123";
+const char*           ssid = "{SSID}";
+const char*           password = "{WIFI_PASSWORD}";
 const char*           hostname = "esp32_ror_controller";
 
 // MQTT credentials
-const char*           mqtt_server = "192.168.15.195";
+const char*           mqtt_server = "{SERVER_ADDRESS}";
 const int             mqtt_port = 1883;
 const char*           mqtt_user = "ROR_Controller";
 const char*           mqtt_pass = "telescope";
