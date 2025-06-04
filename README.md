@@ -41,3 +41,5 @@ indicators of roof and telescope status.
     =========
     27-May-2025   v1.0      Initial version (Manual, HTTP and MQTT interfaces)
     2-Jun-2025    v1.1      Addded Serial UART interface
+
+![image](https://github.com/user-attachments/assets/67e3b8c9-5e1e-47c8-8366-a46b55fa66b9)
