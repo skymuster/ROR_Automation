@@ -1,9 +1,9 @@
 /**************************************************************************************************************************************************
 * File name     : sketch_ESP32_ROR.ino
-* Version:      : 1.1
+* Version:      : 1.2
 * Author        : Mike Newby   
 * Created       : 2-Jun-2025
-* Last modified :
+* Last modified : 4-Jun-2025
 *
 * Description   :
     This sketch provides 4 separate control mechanisms for controlling the ROR Observatory:
@@ -45,6 +45,9 @@
     =========
     27-May-2025   v1.0      Initial version (Manual, HTTP and MQTT interfaces)
     2-Jun-2025    v1.1      Addded Serial UART interface
+    4-Jun-2025    v1.2      Replaced LED pins with serial interface to an external shift register interface (model: 74HC595). This allows up to 8 LEDs 
+                            to be controlled using just 5 pins (data, clock, latch, VCC, GND). This allows for a CAT6 cable to be employed between the 
+                            user interaface panel and the control box.
 *
 **************************************************************************************************************************************************/
 
@@ -63,15 +66,15 @@
 /*-----------------------------------------------------------------------------------------------------------------------------------------------*/
 
 // WiFi credentials
-const char*           ssid = "{REPLACE WITH SSID}";
-const char*           password = "{REPLACE WITH WIFI PASSWORD}";
+const char*           ssid = "{SSID}";
+const char*           password = "{PASSWORD}";
 const char*           hostname = "esp32_ror_controller";
 
 // MQTT credentials
-const char*           mqtt_server = "{REPLACE WITH MQTT SERVER IP ADDRESS}";
-const int             mqtt_port = 1883;
-const char*           mqtt_user = "{REPLACE WITH MQTT USERNAME}";
-const char*           mqtt_pass = "{REPLACE WITH MQTT PASSWORD}";
+const char*           mqtt_server = "{MQTT Server name}";
+const int             mqtt_port = {MQTT Server Port};
+const char*           mqtt_user = "{MQTT user name}";
+const char*           mqtt_pass = "{MQTT password}";
 
 /*-----------------------------------------------------------------------------------------------------------------------------------------------*/
 /*------------------------------------ Global Variables -----------------------------------------------------------------------------------------*/
@@ -80,10 +83,6 @@ const char*           mqtt_pass = "{REPLACE WITH MQTT PASSWORD}";
 // MQTT and WiFi clients
 WiFiClient            espClient;
 PubSubClient          mqtt_client(espClient);
-
-
-// Bluetooth variables
-//BluetoothSerial       SerialBT;
 
 // UART Serial variables
 String                serialin;
@@ -100,6 +99,7 @@ bool                  roof_lost = false;
 bool                  telescope_safe = false;
 bool                  ra_safe = false;
 bool                  dec_safe = false;
+bool                  scope_pwr = false;
 int                   mqttCounterConn = 0;
 bool                  roof_open = false;
 bool                  roof_closed = false;
@@ -116,6 +116,7 @@ unsigned long         lastSerialInitCheck = 0;
 enum                  RoofStatusVal{OPEN, CLOSED, MOVING, LOST};
 String                roof_status_text;
 RoofStatusVal         roof_status;
+byte                  ledState = 0b00000000;  // Used to track up to 8 LEDs
 
 // Debounce variables
 const unsigned long   debounceDelay = 50; // milliseconds
@@ -123,37 +124,53 @@ bool                  lastOpenState = HIGH;
 bool                  lastCloseState = HIGH;
 bool                  lastStopState = HIGH;
 bool                  lastOSCState = HIGH;
+bool                  lastPWRReading = HIGH;         // last physical reading (HIGH = unpressed)
+bool                  lastPWRStableState = HIGH;     // last debounced stable state
 unsigned long         lastDebounceOpenTime = 0;
 unsigned long         lastDebounceCloseTime = 0;
 unsigned long         lastDebounceStopTime = 0;
 unsigned long         lastDebounceOSCTime = 0;
+unsigned long         lastDebouncePWRTime = 0;
+
+
+// Shift register LED bit mappings
+#define               ROOF_LED_OPEN         0
+#define               ROOF_LED_CLOSED       1
+#define               ROOF_LED_MOVING       2
+#define               TELESCOPE_SAFE_LED    3
+#define               TELESCOPE_UNSAFE_LED  4
+#define               TELESCOPE_POWER_LED   5
 
 
 /*-----------------------------------------------------------------------------------------------------------------------------------------------*/
 /*------------------------------------I/O Definitions--------------------------------------------------------------------------------------------*/
 /*-----------------------------------------------------------------------------------------------------------------------------------------------*/
 
-#define USE_SINGLE_OSC_BUTTON false  // This flag sets whether the motor controller has a single button  to control Open/Stop/Close (OSC) or uses 3 separate buttons
+#define USE_SINGLE_OSC_BUTTON true  // This flag sets whether the motor controller has a single button  to control Open/Stop/Close (OSC) or uses 3 separate buttons
 
-#define RA_SWITCH           32
-#define DEC_SWITCH          33
-#define TELESCOPE_SAFE_LED  19
-#define ROOF_OPENED_SENSOR   4
-#define ROOF_CLOSED_SENSOR   5
-#define ROOF_LED_OPEN       21
-#define ROOF_LED_CLOSED     22
-#define ROOF_LED_MOVING     23
-#define PUSHBUTTON_OPEN     12
-#define PUSHBUTTON_CLOSE    13
-#define PUSHBUTTON_STOP     14
-#define PUSHBUTTON_OSC      12
-#define RELAY_OPEN          25
-#define RELAY_CLOSE         26
-#define RELAY_STOP          27
-#define BUZZER_PIN           2
-#define RELAY_OSC           25
-#define UART_SERIAL_TX      17
-#define UART_SERIAL_RX      16
+// Sensors
+#define RA_SWITCH             32
+#define DEC_SWITCH            33
+#define ROOF_OPENED_SENSOR    4
+#define ROOF_CLOSED_SENSOR    5
+// Pushbuttons
+#define PUSHBUTTON_STOP       14
+#define PUSHBUTTON_OSC        12
+#define PUSHBUTTON_PWR        18
+// Relays
+#define RELAY_STOP            27
+#define RELAY_OSC             25
+#define RELAY_PWR             19
+// Buzzer
+#define BUZZER_PIN            2
+// UART
+#define UART_SERIAL_TX        17
+#define UART_SERIAL_RX        16
+// Shift register (for LED control)
+#define SR_DATA               21  // DATA / SER
+#define SR_CLOCK              22  // CLOCK / SRCLK
+#define SR_LATCH              23  // LATCH / RCLK
+
 
 /*-----------------------------------------------------------------------------------------------------------------------------------------------*/
 /*------------------------------------MQTT Auto-discovery Payloads-------------------------------------------------------------------------------*/
@@ -368,6 +385,42 @@ const char* DISCOVERY_BUTTON_OSC =
     }
   })";
 
+// MQTT discovery payload for MQTT switch: "power"
+const char* DISCOVERY_BUTTON_PWR =
+  R"({
+    "name": "Telescope Power",
+    "command_topic": "home/observatory/roof/cmd/power",
+    "payload_press": "ON",
+    "retain": false,
+    "unique_id": "ror_roof_telescope_pwr_btn",
+    "device": {
+      "name": "ROR_Controller",
+      "model": "ESPRESSIF ESP32-WROOM",
+      "manufacturer": "Lonely Binary",
+      "sw_version": "1.0",
+      "identifiers": ["esp32_ror_controller"]      
+    }
+  })";
+
+// MQTT discovery payload for binary_sensor: “Telescope Power Status"
+const char* DISCOVERY_TELESCOPE_POWER =
+  R"({
+    "name": "Telescope Power State",
+    "state_topic": "home/observatory/roof/state/power",
+    "payload_on": "true",
+    "payload_off": "false",
+    "device_class": "power",
+    "unique_id": "esp32_ror_controller_telescope_power_state",
+    "device": {
+      "name": "ROR_Controller",
+      "model": "ESPRESSIF ESP32-WROOM",
+      "manufacturer": "Lonely Binary",
+      "sw_version": "1.0",
+      "identifiers": ["esp32_ror_controller"]      
+    }
+  })";
+
+
 /*-----------------------------------------------------------------------------------------------------------------------------------------------*/
 /*------------------------------------ SETUP ----------------------------------------------------------------------------------------------------*/
 /*-----------------------------------------------------------------------------------------------------------------------------------------------*/
@@ -466,26 +519,23 @@ void setup() {
 	// Set  modes for GPIO pins
   pinMode(RA_SWITCH, INPUT_PULLUP);
   pinMode(DEC_SWITCH, INPUT_PULLUP);
-  pinMode(TELESCOPE_SAFE_LED, OUTPUT);
   pinMode(ROOF_OPENED_SENSOR, INPUT_PULLUP);
   pinMode(ROOF_CLOSED_SENSOR, INPUT_PULLUP);
-  pinMode(ROOF_LED_OPEN, OUTPUT);
-	pinMode(ROOF_LED_CLOSED, OUTPUT);
-	pinMode(ROOF_LED_MOVING, OUTPUT);
-  pinMode(PUSHBUTTON_OPEN, INPUT_PULLUP);
-  pinMode(PUSHBUTTON_CLOSE, INPUT_PULLUP);
   pinMode(PUSHBUTTON_STOP, INPUT_PULLUP);
   pinMode(PUSHBUTTON_OSC, INPUT_PULLUP);
-  pinMode(RELAY_OPEN, OUTPUT);
-  pinMode(RELAY_CLOSE, OUTPUT); 
+  pinMode(PUSHBUTTON_PWR, INPUT_PULLUP);
+  pinMode(RELAY_OSC, OUTPUT);
   pinMode(RELAY_STOP, OUTPUT);
+  pinMode(RELAY_PWR, OUTPUT);
   pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(SR_DATA, OUTPUT);
+  pinMode(SR_CLOCK, OUTPUT);
+  pinMode(SR_LATCH, OUTPUT);
 	
 	// Set initial states of relays and buzzer
-	digitalWrite(RELAY_OPEN, LOW);
-	digitalWrite(RELAY_CLOSE, LOW);
 	digitalWrite(RELAY_STOP, LOW);
   digitalWrite(RELAY_OSC, LOW);
+  digitalWrite(RELAY_PWR, LOW);
   digitalWrite(BUZZER_PIN, LOW);
 
   UART_Serial.print("RRCI#"); //init string
@@ -578,43 +628,51 @@ void loop() {
   else if (!roof_open && roof_closed) roof_status = CLOSED;
   else roof_status = MOVING;
 
-  
+  // Check telescope power status
+  scope_pwr = (digitalRead(RELAY_PWR) == HIGH);
+    
   //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
   // Set LED states according to sensor states
   //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-  // TELESCOPE SAFE
-  digitalWrite(TELESCOPE_SAFE_LED, telescope_safe ? HIGH : LOW);
+  // TELESCOPE SAFE LEDs
+  if (telescope_safe) {
+    setLED(TELESCOPE_SAFE_LED, true);
+    setLED(TELESCOPE_UNSAFE_LED, false);
+  } else {
+    setLED(TELESCOPE_SAFE_LED, false);
+    setLED(TELESCOPE_UNSAFE_LED, true);
+  }
   
+  // ROOF STATUS LEDs
   unsigned long now = millis();
-
   switch (roof_status) {
       case OPEN:
         roof_status_text = "Open";
-        digitalWrite(ROOF_LED_OPEN, HIGH);
-        digitalWrite(ROOF_LED_CLOSED, LOW);
-        digitalWrite(ROOF_LED_MOVING, LOW);
+        setLED(ROOF_LED_OPEN, true);
+        setLED(ROOF_LED_CLOSED, false);
+        setLED(ROOF_LED_MOVING, false);
         roofLedState = false;
         lostLedState = false;
         break;
 
       case CLOSED:
         roof_status_text = "Closed";
-        digitalWrite(ROOF_LED_OPEN, LOW);
-        digitalWrite(ROOF_LED_CLOSED, HIGH);
-        digitalWrite(ROOF_LED_MOVING, LOW);
+        setLED(ROOF_LED_OPEN, false);
+        setLED(ROOF_LED_CLOSED, true);
+        setLED(ROOF_LED_MOVING, false);
         roofLedState = false;
         lostLedState = false;
         break;
 
       case MOVING:
         roof_status_text = "Moving";
-        digitalWrite(ROOF_LED_OPEN, LOW);
-        digitalWrite(ROOF_LED_CLOSED, LOW);
+        setLED(ROOF_LED_OPEN, false);
+        setLED(ROOF_LED_CLOSED, false);
         if (now - lastRoofFlashTime >= 500) {
           lastRoofFlashTime = now;
           roofLedState = !roofLedState;
-          digitalWrite(ROOF_LED_MOVING, roofLedState ? HIGH : LOW);
+          setLED(ROOF_LED_MOVING, roofLedState);
         }
         break;
 
@@ -623,13 +681,22 @@ void loop() {
         if (now - lastLostFlashTime >= 500) {
           lastLostFlashTime = now;
           lostLedState = !lostLedState;
-          digitalWrite(ROOF_LED_OPEN, lostLedState ? HIGH : LOW);
-          digitalWrite(ROOF_LED_CLOSED, lostLedState ? HIGH : LOW);
-          digitalWrite(ROOF_LED_MOVING, lostLedState ? HIGH : LOW);
+          setLED(ROOF_LED_OPEN, lostLedState);
+          setLED(ROOF_LED_CLOSED, lostLedState);
+          setLED(ROOF_LED_MOVING, lostLedState);
           break;
         }
   }
+
+  // Telescope Power ON LED
+  setLED(TELESCOPE_POWER_LED, scope_pwr);
   
+
+  // Update the physical shift register to send the LED status to the LEDs
+  digitalWrite(SR_LATCH, LOW);
+  shiftOut(SR_DATA, SR_CLOCK, MSBFIRST, ledState);
+  digitalWrite(SR_LATCH, HIGH);
+
 
   //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
   // Publish sensor states to MQTT
@@ -643,6 +710,7 @@ void loop() {
   mqtt_client.publish("home/observatory/roof/state/moving", (!roof_open && !roof_closed && !roof_lost) ? "true" : "false", true);
   mqtt_client.publish("home/observatory/roof/state/lost", roof_lost ? "true" : "false", true);
   mqtt_client.publish("home/observatory/roof/state/roof_status", roof_status_text.c_str(), true);
+  mqtt_client.publish("home/observatory/roof/state/power", scope_pwr ? "true" : "false", true);
   
   //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
   // RESPOND TO MANUAL PUSHBUTTONS (includes debounce logic)
@@ -650,32 +718,36 @@ void loop() {
 
 	// READ CURRENT STATES
   bool readingOSC = digitalRead(PUSHBUTTON_OSC);
-  bool readingOpen = digitalRead(PUSHBUTTON_OPEN);
-	bool readingClose = digitalRead(PUSHBUTTON_CLOSE);
+  //bool readingOpen = digitalRead(PUSHBUTTON_OPEN);
+	//bool readingClose = digitalRead(PUSHBUTTON_CLOSE);
 	bool readingStop = digitalRead(PUSHBUTTON_STOP);
-
+  bool readingPWR = digitalRead(PUSHBUTTON_PWR);
+  
 	unsigned long currentTime = millis();
 
-  if (USE_SINGLE_OSC_BUTTON) {
-    if (readingOSC != lastOSCState) lastDebounceOSCTime = currentTime;
-    if (((currentTime - lastDebounceOSCTime) > debounceDelay) && (readingOSC == LOW)) ToggleRoof();
-    lastOSCState = readingOSC;
-  } else {
-    // OPEN BUTTON
-    if (readingOpen != lastOpenState) lastDebounceOpenTime = currentTime;
-    if (((currentTime - lastDebounceOpenTime) > debounceDelay) && (readingOpen == LOW)) OpenRoof();
-    lastOpenState = readingOpen;
+  // OSC BUTTON
+  if (readingOSC != lastOSCState) lastDebounceOSCTime = currentTime;
+  if (((currentTime - lastDebounceOSCTime) > debounceDelay) && (readingOSC == LOW)) ToggleRoof();
+  lastOSCState = readingOSC;
+ 
+  // STOP BUTTON
+  if (readingStop != lastStopState) lastDebounceStopTime = currentTime;
+  if (((currentTime - lastDebounceStopTime) > debounceDelay) && (readingStop == LOW)) StopRoof();
+  lastStopState = readingStop;
 
-    // CLOSE BUTTON
-    if (readingClose != lastCloseState) lastDebounceCloseTime = currentTime;
-    if (((currentTime - lastDebounceCloseTime) > debounceDelay) && (readingClose == LOW)) CloseRoof();
-    lastCloseState = readingClose;
-
-    // STOP BUTTON
-    if (readingStop != lastStopState) lastDebounceStopTime = currentTime;
-    if (((currentTime - lastDebounceStopTime) > debounceDelay) && (readingStop == LOW)) StopRoof();
-    lastStopState = readingStop;
+  // Telescope Power button
+  if (readingPWR != lastPWRReading) {
+    lastDebouncePWRTime = currentTime;
+    lastPWRReading = readingPWR;
   }
+  if ((currentTime - lastDebouncePWRTime) > debounceDelay) {
+    // Only toggle if the button state has changed from HIGH to LOW (i.e. button is pressed down)
+    if (lastPWRStableState == HIGH && readingPWR == LOW) {
+      ToggleTelescopePower();
+    }
+    lastPWRStableState = readingPWR;
+  }
+
 
   //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
   // RESPOND TO SERIAL comms (over UART serial conenction)
@@ -769,22 +841,6 @@ void loop() {
     Serial.println();
 
 	}	  
-     
-	//delay(500); // Publish every 0.5 seconds
-
-/*
-  static unsigned long lastDebugTime = 0;
-  if (millis() - lastDebugTime > 10000) {
-    lastDebugTime = millis();
-    Serial.print("WiFi status: ");
-    Serial.print(WiFi.status());
-    Serial.print(",  MQTT connected: ");
-    Serial.print(mqtt_client.connected());
-    Serial.print(",  Free Heap: ");
-    Serial.println(ESP.getFreeHeap());
-  }
-*/
-
 
 }
 
@@ -799,66 +855,15 @@ void loop() {
 // *******************************************************************************************************
 
 void OpenRoof () {
-    if (telescope_safe) {
-      if (!roof_open && !roof_closed && !roof_lost) {    // First stop the roof if it is currently moving
-        StopRoof();
-        delay(1000);
-      }
-			digitalWrite(RELAY_OPEN, HIGH);
-      delay(500);
-      digitalWrite(RELAY_OPEN, LOW);
-			UART_Serial.println("Opening roof...");
-      Serial.println("Opening roof...");
-      http_server.send(200, "text/plain", "Opening roof...");
-      tone(BUZZER_PIN, 1350);
-      delay(100);
-      noTone(BUZZER_PIN);
-      delay(100);
-      tone(BUZZER_PIN, 1350);
-      delay(100);
-      noTone(BUZZER_PIN);
-    }	else {
-      UART_Serial.println("Cannot open roof - telescope is UNSAFE");
-      Serial.println("Cannot open roof - telescope is UNSAFE");
-      http_server.send(200, "text/plain", "Cannot open roof - telescope is UNSAFE");
-      tone(BUZZER_PIN, 1000);
-      delay(1000);
-      noTone(BUZZER_PIN);
-    }
+    ToggleRoof();
 }
-
 
 // *******************************************************************************************************
 // Function to CLOSE the roof, including checking that the telescope is safe
 // *******************************************************************************************************
 
 void CloseRoof () {
-    if (telescope_safe) {
-      if (!roof_open && !roof_closed && !roof_lost) {    // First stop the roof if it is currently moving
-        StopRoof();
-        delay(1000);
-      }
-			digitalWrite(RELAY_CLOSE, HIGH);
-      delay(500);
-      digitalWrite(RELAY_CLOSE, LOW);
-			UART_Serial.println("Closing roof...");
-      Serial.println("Closing roof...");
-      http_server.send(200, "text/plain", "Closing roof...");
-      tone(BUZZER_PIN, 1350);
-      delay(100);
-      noTone(BUZZER_PIN);
-      delay(100);
-      tone(BUZZER_PIN, 1350);
-      delay(100);
-      noTone(BUZZER_PIN);
-    } else {
-      UART_Serial.println("Cannot close roof - telescope is UNSAFE");
-      Serial.println("Cannot close roof - telescope is UNSAFE");
-      http_server.send(200, "text/plain", "Cannot close roof - telescope is UNSAFE");
-      tone(BUZZER_PIN, 1000);
-      delay(1000);
-      noTone(BUZZER_PIN);
-    }
+    ToggleRoof();
 }
 
 
@@ -867,8 +872,8 @@ void CloseRoof () {
 // *******************************************************************************************************
 
 void StopRoof () {
-    digitalWrite(RELAY_OPEN, LOW);
-    digitalWrite(RELAY_CLOSE, LOW);
+    //digitalWrite(RELAY_OPEN, LOW);
+    //digitalWrite(RELAY_CLOSE, LOW);
     digitalWrite(RELAY_STOP, HIGH); 
     delay(500);
     digitalWrite(RELAY_STOP, LOW);
@@ -887,9 +892,19 @@ void ToggleRoof () {
 			digitalWrite(RELAY_OSC, HIGH);
       delay(500);
       digitalWrite(RELAY_OSC, LOW);
-			UART_Serial.println("Toggling roof...");
-      Serial.println("Toggling roof...");
-      http_server.send(200, "text/plain", "Toggling roof...");
+			if (roof_open && !roof_closed) {
+        UART_Serial.println("Closing roof...");
+        Serial.println("Closing roof...");
+        http_server.send(200, "text/plain", "Closing roof...");
+      } else if (!roof_open && roof_closed) {
+        UART_Serial.println("Opening roof...");
+        Serial.println("Opening roof...");
+        http_server.send(200, "text/plain", "Closing roof...");
+      } else {
+        UART_Serial.println("Stopping roof...");
+        Serial.println("Stopping roof...");
+        http_server.send(200, "text/plain", "Stopping roof...");
+      }
       tone(BUZZER_PIN, 1350);
       delay(100);
       noTone(BUZZER_PIN);
@@ -898,13 +913,30 @@ void ToggleRoof () {
       delay(100);
       noTone(BUZZER_PIN);
     }	else {
-      UART_Serial.println("Cannot toggle roof - telescope is UNSAFE");
-      Serial.println("Cannot toggle roof - telescope is UNSAFE");
-      http_server.send(200, "text/plain", "Cannot toggle roof - telescope is UNSAFE");
+      UART_Serial.println("Cannot move roof - telescope is UNSAFE");
+      Serial.println("Cannot move roof - telescope is UNSAFE");
+      http_server.send(200, "text/plain", "Cannot move roof - telescope is UNSAFE");
       tone(BUZZER_PIN, 1000);
       delay(1000);
       noTone(BUZZER_PIN);
     }
+}
+
+
+// *******************************************************************************************************
+// Function to turn on power to telescope equipment via relay (mount, miniPC, dew heater, etc.)
+// *******************************************************************************************************
+
+void ToggleTelescopePower () {
+  scope_pwr = !scope_pwr;
+
+  if (scope_pwr) {
+    digitalWrite(RELAY_PWR, HIGH); 
+    Serial.println("Telescope power ON");
+  } else {
+    digitalWrite(RELAY_PWR, LOW); 
+    Serial.println("Telescope power OFF");
+  }
 }
 
 
@@ -928,13 +960,11 @@ void callback(char* topic, byte* payload, unsigned int length) {
   Serial.print("CMD = ");
   Serial.println(cmd);
 
-  if (USE_SINGLE_OSC_BUTTON) {
-    if (String(topic) == "home/observatory/roof/cmd/osc_toggle" && cmd == "ON") ToggleRoof();
-  } else {
-    if (String(topic) == "home/observatory/roof/cmd/open" && cmd == "ON") OpenRoof();
-    if (String(topic) == "home/observatory/roof/cmd/close" && cmd == "ON") CloseRoof();
-    if (String(topic) == "home/observatory/roof/cmd/stop" && cmd == "ON") StopRoof();
-  }
+  if (String(topic) == "home/observatory/roof/cmd/osc_toggle" && cmd == "ON") ToggleRoof();
+  if (String(topic) == "home/observatory/roof/cmd/open" && cmd == "ON") OpenRoof();
+  if (String(topic) == "home/observatory/roof/cmd/close" && cmd == "ON") CloseRoof();
+  if (String(topic) == "home/observatory/roof/cmd/stop" && cmd == "ON") StopRoof();
+  if (String(topic) == "home/observatory/roof/cmd/power" && cmd == "ON") ToggleTelescopePower();
 }
 
 
@@ -954,16 +984,14 @@ void publishDiscovery() {
       mqtt_client.publish("homeassistant/binary_sensor/dec_safe_sensor/config",       DISCOVERY_DEC_SAFE, true);
       mqtt_client.publish("homeassistant/binary_sensor/telescope_safe/config",        DISCOVERY_TELESCOPE_SAFE, true);
       mqtt_client.publish("homeassistant/sensor/roof_status/config",                  DISCOVERY_ROOF_STATUS, true);
+      mqtt_client.publish("homeassistant/binary_sensor/power/config",                 DISCOVERY_TELESCOPE_POWER, true);
       
-
       // buttons
-      if (USE_SINGLE_OSC_BUTTON) {
-        mqtt_client.publish("homeassistant/button/roof_osc/config",             DISCOVERY_BUTTON_OSC, true);
-      } else {
-        mqtt_client.publish("homeassistant/button/roof_open/config",            DISCOVERY_BUTTON_OPEN, true);
-        mqtt_client.publish("homeassistant/button/roof_close/config",           DISCOVERY_BUTTON_CLOSE, true);
-        mqtt_client.publish("homeassistant/button/roof_stop/config",            DISCOVERY_BUTTON_STOP, true);
-      }
+      mqtt_client.publish("homeassistant/button/roof_osc/config",                     DISCOVERY_BUTTON_OSC, true);
+      //mqtt_client.publish("homeassistant/button/roof_open/config",                  DISCOVERY_BUTTON_OPEN, true);
+      //mqtt_client.publish("homeassistant/button/roof_close/config",                 DISCOVERY_BUTTON_CLOSE, true);
+      mqtt_client.publish("homeassistant/button/roof_stop/config",                    DISCOVERY_BUTTON_STOP, true);
+      mqtt_client.publish("homeassistant/button/power/config",                        DISCOVERY_BUTTON_PWR, true);
     }
 }
 
@@ -1007,3 +1035,15 @@ void getStatus() {
 void getSafetyStatus() {
     http_server.send(200, "application/json", telescope_safe ? "true" : "false");
   }
+
+
+// *******************************************************************************************************
+// Function to set the LEDs using the shift register
+// *******************************************************************************************************
+
+void setLED(uint8_t ledIndex, bool on) {
+  if (on)
+    ledState |= (1 << ledIndex);
+  else
+    ledState &= ~(1 << ledIndex);
+}
