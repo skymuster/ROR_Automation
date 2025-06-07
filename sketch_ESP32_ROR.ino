@@ -1,9 +1,9 @@
 /**************************************************************************************************************************************************
 * File name     : sketch_ESP32_ROR.ino
-* Version:      : 1.2
+* Version:      : 1.3
 * Author        : Mike Newby   
 * Created       : 2-Jun-2025
-* Last modified : 4-Jun-2025
+* Last modified : 7-Jun-2025
 *
 * Description   :
     This sketch provides 4 separate control mechanisms for controlling the ROR Observatory:
@@ -48,6 +48,10 @@
     4-Jun-2025    v1.2      Replaced LED pins with serial interface to an external shift register interface (model: 74HC595). This allows up to 8 LEDs 
                             to be controlled using just 5 pins (data, clock, latch, VCC, GND). This allows for a CAT6 cable to be employed between the 
                             user interaface panel and the control box.
+    7-Jun-2025    v1.3      Changed pushbutton interface to use a parallel-to-serial serial shift regisster (74HC165).  This allows up to 8 switches 
+                            to be controlled using just one extra data pin.  Added 3 extra pushbutton switches to control observatory lighting (max,
+                            dim, off) - these will be setup to control LED smart lights that are integrated into home assistant and will be controlled
+                            via MQTT.
 *
 **************************************************************************************************************************************************/
 
@@ -120,17 +124,19 @@ byte                  ledState = 0b00000000;  // Used to track up to 8 LEDs
 
 // Debounce variables
 const unsigned long   debounceDelay = 50; // milliseconds
-bool                  lastOpenState = HIGH;
-bool                  lastCloseState = HIGH;
 bool                  lastStopState = HIGH;
 bool                  lastOSCState = HIGH;
 bool                  lastPWRReading = HIGH;         // last physical reading (HIGH = unpressed)
 bool                  lastPWRStableState = HIGH;     // last debounced stable state
-unsigned long         lastDebounceOpenTime = 0;
-unsigned long         lastDebounceCloseTime = 0;
+bool                  lastLightsMaxState = HIGH;
+bool                  lastLightsDimState = HIGH;
+bool                  lastLightsOffState = HIGH;
 unsigned long         lastDebounceStopTime = 0;
 unsigned long         lastDebounceOSCTime = 0;
 unsigned long         lastDebouncePWRTime = 0;
+unsigned long         lastDebounceLightsMaxTime = 0;
+unsigned long         lastDebounceLightsDimTime = 0;
+unsigned long         lastDebounceLightsOffTime = 0;
 
 
 // Shift register LED bit mappings
@@ -146,30 +152,26 @@ unsigned long         lastDebouncePWRTime = 0;
 /*------------------------------------I/O Definitions--------------------------------------------------------------------------------------------*/
 /*-----------------------------------------------------------------------------------------------------------------------------------------------*/
 
-#define USE_SINGLE_OSC_BUTTON true  // This flag sets whether the motor controller has a single button  to control Open/Stop/Close (OSC) or uses 3 separate buttons
-
 // Sensors
 #define RA_SWITCH             32
 #define DEC_SWITCH            33
 #define ROOF_OPENED_SENSOR    4
 #define ROOF_CLOSED_SENSOR    5
-// Pushbuttons
-#define PUSHBUTTON_STOP       14
-#define PUSHBUTTON_OSC        12
-#define PUSHBUTTON_PWR        18
 // Relays
-#define RELAY_STOP            27
-#define RELAY_OSC             25
+#define RELAY_STOP            18
+#define RELAY_OSC             21
 #define RELAY_PWR             19
 // Buzzer
-#define BUZZER_PIN            2
+#define BUZZER_PIN            25
 // UART
 #define UART_SERIAL_TX        17
 #define UART_SERIAL_RX        16
 // Shift register (for LED control)
-#define SR_DATA               21  // DATA / SER
-#define SR_CLOCK              22  // CLOCK / SRCLK
-#define SR_LATCH              23  // LATCH / RCLK
+#define SR_DATA_595           12  // DATA byte to send to pin SER/DS on the 74HC595 shift register (to control LEDs) 
+#define SR_DATA_165           14  // DATA byte to receive from pin Q7/QH on the 74HC165 shift register (to respond to buttons)
+#define SR_CLOCK              27  // CLOCK / SRCLK
+#define SR_LATCH              26  // LATCH / RCLK
+
 
 
 /*-----------------------------------------------------------------------------------------------------------------------------------------------*/
@@ -317,40 +319,6 @@ const char* DISCOVERY_ROOF_STATUS = R"({
   }
 })";
 
-// MQTT discovery payload for MQTT switch: "open"
-const char* DISCOVERY_BUTTON_OPEN =
-  R"({
-    "name": "Roof Open Command",
-    "command_topic": "home/observatory/roof/cmd/open",
-    "payload_press": "ON",
-    "retain": false,
-    "unique_id": "ror_roof_open_btn",
-    "device": {
-      "name": "ROR_Controller",
-      "model": "ESPRESSIF ESP32-WROOM",
-      "manufacturer": "Lonely Binary",
-      "sw_version": "1.0",
-      "identifiers": ["esp32_ror_controller"]      
-    }
-  })";
-
-// MQTT discovery payload for MQTT switch: "close"
-const char* DISCOVERY_BUTTON_CLOSE =
-  R"({
-    "name": "Roof Close Command",
-    "command_topic": "home/observatory/roof/cmd/close",
-    "payload_press": "ON",
-    "retain": false,
-    "unique_id": "ror_roof_close_btn",
-    "device": {
-      "name": "ROR_Controller",
-      "model": "ESPRESSIF ESP32-WROOM",
-      "manufacturer": "Lonely Binary",
-      "sw_version": "1.0",
-      "identifiers": ["esp32_ror_controller"]      
-    }
-  })";
-
 // MQTT discovery payload for MQTT switch: "stop"
 const char* DISCOVERY_BUTTON_STOP =
   R"({
@@ -420,6 +388,56 @@ const char* DISCOVERY_TELESCOPE_POWER =
     }
   })";
 
+// MQTT discovery payload for MQTT switch: "lights_max"
+const char* DISCOVERY_BUTTON_LIGHTS_MAX =
+  R"({
+    "name": "Observatory Lights Max",
+    "command_topic": "home/observatory/roof/cmd/lights_max",
+    "payload_press": "ON",
+    "retain": false,
+    "unique_id": "ror_roof_lights_max_btn",
+    "device": {
+      "name": "ROR_Controller",
+      "model": "ESPRESSIF ESP32-WROOM",
+      "manufacturer": "Lonely Binary",
+      "sw_version": "1.0",
+      "identifiers": ["esp32_ror_controller"]      
+    }
+  })";
+
+// MQTT discovery payload for MQTT switch: "lights_dim"
+const char* DISCOVERY_BUTTON_LIGHTS_DIM =
+  R"({
+    "name": "Observatory Lights Dim",
+    "command_topic": "home/observatory/roof/cmd/lights_dim",
+    "payload_press": "ON",
+    "retain": false,
+    "unique_id": "ror_roof_lights_dim_btn",
+    "device": {
+      "name": "ROR_Controller",
+      "model": "ESPRESSIF ESP32-WROOM",
+      "manufacturer": "Lonely Binary",
+      "sw_version": "1.0",
+      "identifiers": ["esp32_ror_controller"]      
+    }
+  })";
+
+  // MQTT discovery payload for MQTT switch: "lights_off"
+const char* DISCOVERY_BUTTON_LIGHTS_OFF =
+  R"({
+    "name": "Observatory Lights Off",
+    "command_topic": "home/observatory/roof/cmd/lights_off",
+    "payload_press": "ON",
+    "retain": false,
+    "unique_id": "ror_roof_lights_off_btn",
+    "device": {
+      "name": "ROR_Controller",
+      "model": "ESPRESSIF ESP32-WROOM",
+      "manufacturer": "Lonely Binary",
+      "sw_version": "1.0",
+      "identifiers": ["esp32_ror_controller"]      
+    }
+  })";
 
 /*-----------------------------------------------------------------------------------------------------------------------------------------------*/
 /*------------------------------------ SETUP ----------------------------------------------------------------------------------------------------*/
@@ -483,13 +501,16 @@ void setup() {
   
 
   //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-  // Initialise Webserver
+  // Initialise Webserver and configure for how to respond to GET/POST messages
   //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-  http_server.on("/roof/open", HTTP_POST, OpenRoof);
-  http_server.on("/roof/close", HTTP_POST, CloseRoof);
   http_server.on("/roof/stop", HTTP_POST, StopRoof);
   http_server.on("/roof/toggle", HTTP_POST, ToggleRoof);
+  http_server.on("/telescope/power", HTTP_POST, ToggleTelescopePower);
+  http_server.on("/lights/max", HTTP_POST, TurnLightsMax);
+  http_server.on("/lights/dim", HTTP_POST, TurnLightsDim);
+  http_server.on("/lights/off", HTTP_POST, TurnLightsOff);
+ 
   http_server.on("/status", HTTP_GET, getStatus);
   http_server.on("/safety_status", HTTP_GET, getSafetyStatus);
   http_server.begin();
@@ -521,14 +542,12 @@ void setup() {
   pinMode(DEC_SWITCH, INPUT_PULLUP);
   pinMode(ROOF_OPENED_SENSOR, INPUT_PULLUP);
   pinMode(ROOF_CLOSED_SENSOR, INPUT_PULLUP);
-  pinMode(PUSHBUTTON_STOP, INPUT_PULLUP);
-  pinMode(PUSHBUTTON_OSC, INPUT_PULLUP);
-  pinMode(PUSHBUTTON_PWR, INPUT_PULLUP);
   pinMode(RELAY_OSC, OUTPUT);
   pinMode(RELAY_STOP, OUTPUT);
   pinMode(RELAY_PWR, OUTPUT);
   pinMode(BUZZER_PIN, OUTPUT);
-  pinMode(SR_DATA, OUTPUT);
+  pinMode(SR_DATA_595, OUTPUT);
+  pinMode(SR_DATA_165, INPUT);
   pinMode(SR_CLOCK, OUTPUT);
   pinMode(SR_LATCH, OUTPUT);
 	
@@ -694,7 +713,7 @@ void loop() {
 
   // Update the physical shift register to send the LED status to the LEDs
   digitalWrite(SR_LATCH, LOW);
-  shiftOut(SR_DATA, SR_CLOCK, MSBFIRST, ledState);
+  shiftOut(SR_DATA_595, SR_CLOCK, MSBFIRST, ledState);
   digitalWrite(SR_LATCH, HIGH);
 
 
@@ -716,37 +735,71 @@ void loop() {
   // RESPOND TO MANUAL PUSHBUTTONS (includes debounce logic)
   //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-	// READ CURRENT STATES
-  bool readingOSC = digitalRead(PUSHBUTTON_OSC);
-  //bool readingOpen = digitalRead(PUSHBUTTON_OPEN);
-	//bool readingClose = digitalRead(PUSHBUTTON_CLOSE);
-	bool readingStop = digitalRead(PUSHBUTTON_STOP);
-  bool readingPWR = digitalRead(PUSHBUTTON_PWR);
-  
+	// Read current status of each of the buttons from the 74HC165 shift register
+ 
+  byte buttonState = 0;
+
+  // Latch current state of buttons (low pulse on PL)
+  digitalWrite(SR_LATCH, LOW);  // shared with 74HC595
+  delayMicroseconds(5);
+  digitalWrite(SR_LATCH, HIGH);
+
+  // Read bits from Q7
+  for (int i = 0; i < 8; i++) {
+    buttonState <<= 1;
+    buttonState |= digitalRead(SR_DATA_165);
+    digitalWrite(SR_CLOCK, HIGH);
+    delayMicroseconds(5);
+    digitalWrite(SR_CLOCK, LOW);
+  }
+
+  // Set boolean variables to reflect the status of each of buttons based on the state (0 or 1) of the Bits within the buttonState Byte
+  bool isLightsMaxPressed = !(buttonState & (1 << 0));  // D0
+  bool isLightsDimPressed = !(buttonState & (1 << 1));  // D1
+  bool isLightsOffPressed = !(buttonState & (1 << 2));  // D2
+  bool isPWRPressed       = !(buttonState & (1 << 3));  // D3
+  bool isStopPressed      = !(buttonState & (1 << 4));  // D4
+  bool isOSCPressed       = !(buttonState & (1 << 5));  // D5
+ 
 	unsigned long currentTime = millis();
 
   // OSC BUTTON
-  if (readingOSC != lastOSCState) lastDebounceOSCTime = currentTime;
-  if (((currentTime - lastDebounceOSCTime) > debounceDelay) && (readingOSC == LOW)) ToggleRoof();
-  lastOSCState = readingOSC;
+  if (isOSCPressed != lastOSCState) lastDebounceOSCTime = currentTime;
+  if (((currentTime - lastDebounceOSCTime) > debounceDelay) && (isOSCPressed == LOW)) ToggleRoof();
+  lastOSCState = isOSCPressed;
  
   // STOP BUTTON
-  if (readingStop != lastStopState) lastDebounceStopTime = currentTime;
-  if (((currentTime - lastDebounceStopTime) > debounceDelay) && (readingStop == LOW)) StopRoof();
-  lastStopState = readingStop;
+  if (isStopPressed != lastStopState) lastDebounceStopTime = currentTime;
+  if (((currentTime - lastDebounceStopTime) > debounceDelay) && (isStopPressed == LOW)) StopRoof();
+  lastStopState = isStopPressed;
 
   // Telescope Power button
-  if (readingPWR != lastPWRReading) {
+  if (isPWRPressed != lastPWRReading) {
     lastDebouncePWRTime = currentTime;
-    lastPWRReading = readingPWR;
+    lastPWRReading = isPWRPressed;
   }
   if ((currentTime - lastDebouncePWRTime) > debounceDelay) {
     // Only toggle if the button state has changed from HIGH to LOW (i.e. button is pressed down)
-    if (lastPWRStableState == HIGH && readingPWR == LOW) {
+    if (lastPWRStableState == HIGH && isPWRPressed == LOW) {
       ToggleTelescopePower();
     }
-    lastPWRStableState = readingPWR;
+    lastPWRStableState = isPWRPressed;
   }
+
+  // Lights MAX button
+  if (isLightsMaxPressed != lastLightsMaxState) lastDebounceLightsMaxTime = currentTime;
+  if (((currentTime - lastDebounceLightsMaxTime) > debounceDelay) && (isLightsMaxPressed == LOW)) TurnLightsMax();
+  lastLightsMaxState = isLightsMaxPressed;
+
+  // Lights DIM button
+  if (isLightsDimPressed != lastLightsDimState) lastDebounceLightsDimTime = currentTime;
+  if (((currentTime - lastDebounceLightsDimTime) > debounceDelay) && (isLightsDimPressed == LOW)) TurnLightsDim();
+  lastLightsDimState = isLightsDimPressed;
+
+  // Lights OFF button
+  if (isLightsOffPressed != lastLightsOffState) lastDebounceLightsOffTime = currentTime;
+  if (((currentTime - lastDebounceLightsOffTime) > debounceDelay) && (isLightsOffPressed == LOW)) TurnLightsOff();
+  lastLightsOffState = isLightsOffPressed;
 
 
   //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -961,10 +1014,11 @@ void callback(char* topic, byte* payload, unsigned int length) {
   Serial.println(cmd);
 
   if (String(topic) == "home/observatory/roof/cmd/osc_toggle" && cmd == "ON") ToggleRoof();
-  if (String(topic) == "home/observatory/roof/cmd/open" && cmd == "ON") OpenRoof();
-  if (String(topic) == "home/observatory/roof/cmd/close" && cmd == "ON") CloseRoof();
   if (String(topic) == "home/observatory/roof/cmd/stop" && cmd == "ON") StopRoof();
   if (String(topic) == "home/observatory/roof/cmd/power" && cmd == "ON") ToggleTelescopePower();
+  if (String(topic) == "home/observatory/roof/cmd/lights_max" && cmd == "ON") TurnLightsMax();
+  if (String(topic) == "home/observatory/roof/cmd/lights_dim" && cmd == "ON") TurnLightsDim();
+  if (String(topic) == "home/observatory/roof/cmd/lights_off" && cmd == "ON") TurnLightsOff();
 }
 
 
@@ -988,13 +1042,13 @@ void publishDiscovery() {
       
       // buttons
       mqtt_client.publish("homeassistant/button/roof_osc/config",                     DISCOVERY_BUTTON_OSC, true);
-      //mqtt_client.publish("homeassistant/button/roof_open/config",                  DISCOVERY_BUTTON_OPEN, true);
-      //mqtt_client.publish("homeassistant/button/roof_close/config",                 DISCOVERY_BUTTON_CLOSE, true);
       mqtt_client.publish("homeassistant/button/roof_stop/config",                    DISCOVERY_BUTTON_STOP, true);
       mqtt_client.publish("homeassistant/button/power/config",                        DISCOVERY_BUTTON_PWR, true);
+      mqtt_client.publish("homeassistant/button/lights_max/config",                   DISCOVERY_BUTTON_LIGHTS_MAX, true);
+      mqtt_client.publish("homeassistant/button/lights_dim/config",                   DISCOVERY_BUTTON_LIGHTS_DIM, true);
+      mqtt_client.publish("homeassistant/button/lights_off/config",                   DISCOVERY_BUTTON_LIGHTS_OFF, true);
     }
 }
-
 
 
 // *******************************************************************************************************
@@ -1046,4 +1100,38 @@ void setLED(uint8_t ledIndex, bool on) {
     ledState |= (1 << ledIndex);
   else
     ledState &= ~(1 << ledIndex);
+}
+
+
+// *******************************************************************************************************
+// Function to turn observatory lights to MAX
+// *******************************************************************************************************
+
+void TurnLightsMax() {
+
+  // Send MQTT message to Home Assistant to enable the "Max" lights scene
+  mqtt_client.publish("observatory/lights/scene", "max");
+
+}
+
+// *******************************************************************************************************
+// Function to turn observatory lights to DIM
+// *******************************************************************************************************
+
+void TurnLightsDim() {
+
+  // Send MQTT message to Home Assistant to enable the "Max" lights scene
+  mqtt_client.publish("observatory/lights/scene", "dim");
+
+}
+
+// *******************************************************************************************************
+// Function to turn OFF observatory lights
+// *******************************************************************************************************
+
+void TurnLightsOff() {
+
+  // Send MQTT message to Home Assistant to enable the "Max" lights scene
+  mqtt_client.publish("observatory/lights/scene", "off");
+
 }
