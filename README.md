@@ -61,7 +61,7 @@ User Interface Panel - Wiring diragram:
 
 User Interface Panel - PCB Layout:
 
-![image](https://github.com/user-attachments/assets/34b8f859-1f39-4c71-bab4-fb0d7c7e1400)
+![image](https://github.com/user-attachments/assets/f68b8dbf-3aa6-480b-b35e-2f748799ebd3)
 
 ROR Control Box - Wiring Diagram:
 
