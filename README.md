@@ -57,12 +57,13 @@ Roll-off Roof Automation Control System - Architecture Diagram:
 
 User Interface Panel - Wiring diragram:
 
-![image](https://github.com/user-attachments/assets/ba2b9b0c-5f99-440d-9e75-b2855d36a397)
+![image](https://github.com/user-attachments/assets/0089542d-57e3-4f5d-aa61-1916281b7dcd)
 
 User Interface Panel - PCB Layout:
 
-![image](https://github.com/user-attachments/assets/1ed39da3-4d87-4be0-92aa-10ca3a9a5c2e)
+![image](https://github.com/user-attachments/assets/52f3bbd2-c1c8-4943-a46a-ef3847ff5727)
 
 ROR Control Box - Wiring Diagram:
 
-![image](https://github.com/user-attachments/assets/3ed933b1-76f4-4974-a50c-0ebb864d1b17)
+![image](https://github.com/user-attachments/assets/b25d38ac-8878-4bc4-92ad-4ab000f69671)
+
