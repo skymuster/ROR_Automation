@@ -3,7 +3,7 @@
 * Version:      : 1.3
 * Author        : Mike Newby   
 * Created       : 2-Jun-2025
-* Last modified : 7-Jun-2025
+* Last modified : 10-Jun-2025
 *
 * Description   :
     This sketch provides 4 separate control mechanisms for controlling the ROR Observatory:
@@ -139,13 +139,21 @@ unsigned long         lastDebounceLightsDimTime = 0;
 unsigned long         lastDebounceLightsOffTime = 0;
 
 
-// Shift register LED bit mappings
-#define               ROOF_LED_OPEN         0
-#define               ROOF_LED_CLOSED       1
-#define               ROOF_LED_MOVING       2
-#define               TELESCOPE_SAFE_LED    3
-#define               TELESCOPE_UNSAFE_LED  4
-#define               TELESCOPE_POWER_LED   5
+// 74HC595 Shift register LED bit mappings (Q#)
+#define               ROOF_OPEN_LED         1
+#define               ROOF_CLOSED_LED       2
+#define               ROOF_MOVING_LED       3
+#define               TELESCOPE_SAFE_LED    4
+#define               TELESCOPE_UNSAFE_LED  5
+#define               TELESCOPE_POWER_LED   6
+
+// 74HC165 Shift register PUSHBUTTON bit mappings (D#)
+#define               LIGHTS_MAX_BUTTON     5
+#define               LIGHTS_DIM_BUTTON     6
+#define               LIGHTS_OFF_BUTTON     7
+#define               POWER_BUTTON          0
+#define               ROOF_STOP_BUTTON      1
+#define               ROOF_OSC_BUTTON       2
 
 
 /*-----------------------------------------------------------------------------------------------------------------------------------------------*/
@@ -668,30 +676,30 @@ void loop() {
   switch (roof_status) {
       case OPEN:
         roof_status_text = "Open";
-        setLED(ROOF_LED_OPEN, true);
-        setLED(ROOF_LED_CLOSED, false);
-        setLED(ROOF_LED_MOVING, false);
+        setLED(ROOF_OPEN_LED, true);
+        setLED(ROOF_CLOSED_LED, false);
+        setLED(ROOF_MOVING_LED, false);
         roofLedState = false;
         lostLedState = false;
         break;
 
       case CLOSED:
         roof_status_text = "Closed";
-        setLED(ROOF_LED_OPEN, false);
-        setLED(ROOF_LED_CLOSED, true);
-        setLED(ROOF_LED_MOVING, false);
+        setLED(ROOF_OPEN_LED, false);
+        setLED(ROOF_CLOSED_LED, true);
+        setLED(ROOF_MOVING_LED, false);
         roofLedState = false;
         lostLedState = false;
         break;
 
       case MOVING:
         roof_status_text = "Moving";
-        setLED(ROOF_LED_OPEN, false);
-        setLED(ROOF_LED_CLOSED, false);
+        setLED(ROOF_OPEN_LED, false);
+        setLED(ROOF_CLOSED_LED, false);
         if (now - lastRoofFlashTime >= 500) {
           lastRoofFlashTime = now;
           roofLedState = !roofLedState;
-          setLED(ROOF_LED_MOVING, roofLedState);
+          setLED(ROOF_MOVING_LED, roofLedState);
         }
         break;
 
@@ -700,9 +708,9 @@ void loop() {
         if (now - lastLostFlashTime >= 500) {
           lastLostFlashTime = now;
           lostLedState = !lostLedState;
-          setLED(ROOF_LED_OPEN, lostLedState);
-          setLED(ROOF_LED_CLOSED, lostLedState);
-          setLED(ROOF_LED_MOVING, lostLedState);
+          setLED(ROOF_OPEN_LED, lostLedState);
+          setLED(ROOF_CLOSED_LED, lostLedState);
+          setLED(ROOF_MOVING_LED, lostLedState);
           break;
         }
   }
@@ -735,16 +743,14 @@ void loop() {
   // RESPOND TO MANUAL PUSHBUTTONS (includes debounce logic)
   //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-	// Read current status of each of the buttons from the 74HC165 shift register
- 
-  byte buttonState = 0;
+	byte buttonState = 0;
 
   // Latch current state of buttons (low pulse on PL)
   digitalWrite(SR_LATCH, LOW);  // shared with 74HC595
   delayMicroseconds(5);
   digitalWrite(SR_LATCH, HIGH);
 
-  // Read bits from Q7
+  // Read the bits from Q7 pin of 74HC165 shift registe,r which contains the state of each button, and store the result in a Byte called ButtonState
   for (int i = 0; i < 8; i++) {
     buttonState <<= 1;
     buttonState |= digitalRead(SR_DATA_165);
@@ -754,13 +760,14 @@ void loop() {
   }
 
   // Set boolean variables to reflect the status of each of buttons based on the state (0 or 1) of the Bits within the buttonState Byte
-  bool isLightsMaxPressed = !(buttonState & (1 << 0));  // D0
-  bool isLightsDimPressed = !(buttonState & (1 << 1));  // D1
-  bool isLightsOffPressed = !(buttonState & (1 << 2));  // D2
-  bool isPWRPressed       = !(buttonState & (1 << 3));  // D3
-  bool isStopPressed      = !(buttonState & (1 << 4));  // D4
-  bool isOSCPressed       = !(buttonState & (1 << 5));  // D5
+  bool isLightsMaxPressed = !(buttonState & (1 << LIGHTS_MAX_BUTTON));
+  bool isLightsDimPressed = !(buttonState & (1 << LIGHTS_DIM_BUTTON));
+  bool isLightsOffPressed = !(buttonState & (1 << LIGHTS_OFF_BUTTON));
+  bool isPWRPressed       = !(buttonState & (1 << POWER_BUTTON));
+  bool isStopPressed      = !(buttonState & (1 << ROOF_STOP_BUTTON));
+  bool isOSCPressed       = !(buttonState & (1 << ROOF_OSC_BUTTON));
  
+
 	unsigned long currentTime = millis();
 
   // OSC BUTTON
