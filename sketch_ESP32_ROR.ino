@@ -52,6 +52,8 @@
                             to be controlled using just one extra data pin.  Added 3 extra pushbutton switches to control observatory lighting (max,
                             dim, off) - these will be setup to control LED smart lights that are integrated into home assistant and will be controlled
                             via MQTT.
+    14-Mar-2026   v1.4      Added adiditonal logic to handle erroneous RRCI ASCOM behaviour whereby additional stop commands were sent after each Open
+                            and Close commands.
 *
 **************************************************************************************************************************************************/
 
@@ -117,6 +119,7 @@ int                   mqttFailureCount = 0;
 unsigned long         now = 0;
 unsigned long         lastWiFiCheck = 0;
 unsigned long         lastSerialInitCheck = 0;
+unsigned long         LastOpenCloseTime = 0;
 enum                  RoofStatusVal{OPEN, CLOSED, MOVING, LOST};
 String                roof_status_text;
 RoofStatusVal         roof_status;
@@ -826,25 +829,11 @@ void loop() {
     //Read serial data from ASCOM and allocate to serialin variable
     serialin = UART_Serial.readStringUntil('#');
 
-		if (serialin == "x") {                            // COMMAND = "x" (Emergency stop whilst opening)
-      StopRoof();
-    }
-    else if (serialin == "y") {           			      // COMMAND = "y" (Emergency stop whilst closing)
-      StopRoof();
-    }
-    else if (serialin == "open") {                    // COMMAND = "open", ACTION = Open roof if safe to do so
-      OpenRoof();
-    }
-    else if (serialin == "close") {                   // COMMAND = "close", ACTION = Close roof if safe to do so
-      CloseRoof();
-    }
-		else if (serialin == "Parkstatus") {              // COMMAND = "Parkstatus", ACTION = return the park status of the telescope
-      UART_Serial.println("0#");
-    }
-		else if (serialin == "Status") {                  // COMMAND = "Status", ACTION = Return the string "RoofOpen"
-			UART_Serial.println("RoofOpen#");
-		}
-		else if (serialin == "get") {                     // COMMAND = "get", ACTION = return the status of the RRCI data in the format: "ROOF_STATUS, TELESCOPE_SAFETY_STATUS, MOBILITY_STATUS#"
+    // Log the command received in the serial monitor
+    Serial.print("Serial command received: ");
+    Serial.print(serialin);
+
+    if (serialin == "get") {                 // COMMAND = "get", ACTION = return the status of the RRCI data in the format: "ROOF_STATUS, TELESCOPE_SAFETY_STATUS, MOBILITY_STATUS#"
 
       // ROOF STATUS: Report the roof status (opened, closed or unknown)
       switch (roof_status) {
@@ -870,7 +859,7 @@ void loop() {
         str += "unsafe,";
       }
 
-       // MOBILITY STATUS: Report mobility status of roof (not moving (open), not moving (closed), moving or unknown)
+      // MOBILITY STATUS: Report mobility status of roof (not moving (open), not moving (closed), moving or unknown)
       switch (roof_status) {
         case OPEN:
           str += "not_moving_o#";
@@ -890,18 +879,52 @@ void loop() {
       
       // Write output back to ASCOM via serial interface
 			UART_Serial.println(str);
-    }
-    
-    Serial.print("Serial command received: ");
-    Serial.print(serialin);
-    if (serialin=="get") {
+
       Serial.print(" : ");
       Serial.print(str);
+      Serial.println();
     }
-    Serial.println();
+        
+    else {       
+      Serial.println();
 
-	}	  
+      if (serialin == "x") {                            // COMMAND = "x" (Emergency stop whilst opening, 1 second buffer to ignore immediate "x" command sent by RRCI driver)
+        if (millis() - LastOpenCloseTime > 1000) {
+          StopRoof();
+        }
+        else {
+          Serial.print("Ignoring stop command (x) received within ");
+          Serial.print((millis() - LastOpenCloseTime));
+          Serial.println(" milliseconds of last Open/Close command");          
+        }
+      }
 
+      else if (serialin == "y") {           			      // COMMAND = "y" (Emergency stop whilst closing, 1 second buffer to ignore immediate "y" command sent by RRCI driver))
+        if (millis() - LastOpenCloseTime > 1000) {
+          StopRoof();
+        }
+        else {
+          Serial.print("Ignoring stop command (y) received within ");
+          Serial.print((millis() - LastOpenCloseTime));
+          Serial.println(" milliseconds of last Open/Close command");   
+        }        
+      }
+      else if (serialin == "open") {                    // COMMAND = "open", ACTION = Open roof if safe to do so
+        LastOpenCloseTime = millis();
+        OpenRoof();
+      }
+      else if (serialin == "close") {                   // COMMAND = "close", ACTION = Close roof if safe to do so
+        LastOpenCloseTime = millis();
+        CloseRoof();
+      }
+      else if (serialin == "Parkstatus") {              // COMMAND = "Parkstatus", ACTION = return the park status of the telescope
+        UART_Serial.println("0#");
+      }
+      else if (serialin == "Status") {                  // COMMAND = "Status", ACTION = Return the string "RoofOpen"
+        UART_Serial.println("RoofOpen#");
+      }
+    }
+	}
 }
 
 // ************************************************************************************************************************************************
