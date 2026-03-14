@@ -49,6 +49,8 @@ indicators of roof and telescope status.
                             to be controlled using just one extra data pin.  Added 3 extra pushbutton switches to control observatory lighting (max,
                             dim, off) - these will be setup to control LED smart lights that are integrated into home assistant and will be controlled
                             via MQTT.
+    14-Mar-2026   v1.4      Added adiditonal logic to handle erroneous RRCI ASCOM behaviour whereby additional stop commands were sent after each Open
+                            and Close commands.
 
 
 Roll-off Roof Automation Control System - Architecture Diagram:
